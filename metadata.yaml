@@ -1,7 +1,7 @@
 name: astrbot_plugin_better_lark_markdown # 插件唯一识别名，以 astrbot_plugin_ 前缀开头
 display_name: 更好的飞书markdown显示
 desc: 这是一个面向飞书的增强版 Markdown 解析器，解决表格、图片显示等问题，目标是以最小的改动支持更多的 Markdown 语法和功能。
-version: v1.0.0
+version: v1.0.1
 author: megumism
 repo: https://github.com/Megumism/astrbot_better_lark_markdown
 support_platforms:

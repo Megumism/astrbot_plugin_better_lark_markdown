@@ -452,7 +452,7 @@ def _patch_send_message_chain(
                             f"[send_patch] Failed to send image from url {img_url}: {e}, falling back to plain text"
                         )
                         await original_send_message_chain(
-                            MessageChain(chain=[Plain(segment)]),
+                            MessageChain(chain=[Plain(f"[图片] {img_url}")]),
                             lark_client,
                             reply_message_id=resolved_reply_id,
                             receive_id=resolved_receive_id,
@@ -537,6 +537,15 @@ def _install_patch() -> None:
                 receive_id=derived_receive_id,
                 receive_id_type=derived_receive_type,
             )
+
+            # Call AstrMessageEvent (super class) so it marks _has_send_oper = True
+            # which prevents the message from falling back to the LLM agent.
+            try:
+                from astrbot.core.platform.astr_message_event import AstrMessageEvent
+
+                await AstrMessageEvent.send(self, message)
+            except Exception as e:
+                logger.debug("Failed to call AstrMessageEvent.send: %s", e)
 
         setattr(LarkMessageEvent, "_markdown_table_send_patch_id", _patch_token)
         LarkMessageEvent.send = _patched_send
