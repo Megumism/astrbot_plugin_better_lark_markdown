@@ -2,8 +2,8 @@
     "card_send_mode": {
         "description": "飞书消息发送方式",
         "type": "string",
-        "default": "reply",
-        "options": ["reply", "direct", "auto"],
-        "hint": "reply: 默认，保持原本的回复形式。direct: 直接发送，不作为回复。auto: 仅当回复内容不同于上一次时采用回复形式发送。"
+        "default": "auto",
+        "options": ["auto", "reply", "direct"],
+        "hint": "auto: 仅当回复内容不同于上一次时采用回复形式发送；reply: 所有消息回复发送，即astrbot默认行为。direct: 所有消息直接发送。"
     }
 }

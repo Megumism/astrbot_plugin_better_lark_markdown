@@ -14,7 +14,7 @@ _original_send_message_chain: Callable[..., Any] | None = None
 _patch_token = object()
 _original_send_method: Callable[..., Any] | None = None
 
-_card_send_mode = "reply"
+_card_send_mode = "auto"
 _last_reply_msg_id_in_chat: dict[tuple[str, str], str] = {}
 
 
@@ -22,20 +22,20 @@ def _normalize_card_send_mode(mode: Any) -> str:
     normalized = str(mode).strip().lower()
     if normalized in {"direct", "reply", "auto"}:
         return normalized
-    return "reply"
+    return "auto"
 
 
 def _set_card_send_mode(config: AstrBotConfig | dict[str, Any] | None) -> None:
     global _card_send_mode
 
     if config is None:
-        _card_send_mode = "reply"
+        _card_send_mode = "auto"
         return
 
     if hasattr(config, "get"):
-        raw_mode = config.get("card_send_mode", "reply")
+        raw_mode = config.get("card_send_mode", "auto")
     else:
-        raw_mode = getattr(config, "card_send_mode", "reply")
+        raw_mode = getattr(config, "card_send_mode", "auto")
 
     _card_send_mode = _normalize_card_send_mode(raw_mode)
     if _card_send_mode != raw_mode:
@@ -103,7 +103,7 @@ def _derive_receive_from_message_obj(message_obj: Any) -> tuple[str | None, str 
 
 
 def _get_table_row_cells(line: str) -> list[str]:
-    """Extract cells from a markdown table row, handling outer pipes."""
+    """Extract cells from a Markdown block row, handling outer pipes."""
     stripped = line.strip()
     if not stripped or "|" not in stripped:
         return []
@@ -117,7 +117,7 @@ def _get_table_row_cells(line: str) -> list[str]:
 
 
 def _is_markdown_table_separator(line: str) -> bool:
-    """Return True when a line looks like a markdown table separator row."""
+    """Return True when a line looks like a Markdown block separator row."""
     cells = _get_table_row_cells(line)
     if len(cells) < 2:
         return False
@@ -126,7 +126,7 @@ def _is_markdown_table_separator(line: str) -> bool:
 
 
 def _is_markdown_table_segment(text: str) -> bool:
-    """Check if a segment is purely a markdown table."""
+    """Check if a segment is purely a Markdown block."""
 
     lines = text.strip().split("\n")
     if len(lines) < 3:
@@ -145,17 +145,17 @@ def _is_markdown_table_segment(text: str) -> bool:
     return all("|" in line for line in lines)
 
 
-def _build_table_card(table_markdown: str) -> dict:
-    """Build a Lark card JSON 2.0 with markdown table as the only content.
+def _build_markdown_card(markdown_text: str) -> dict:
+    """Build a Lark card JSON 2.0 with markdown as the only content.
 
     Args:
-        table_markdown: Markdown table text
+        markdown_text: Markdown text (table, image, etc.)
 
     Returns:
         Card JSON structure
     """
 
-    logger.debug("[table_card] Building card for markdown table")
+    logger.debug("[markdown_card] Building card for markdown content")
 
     card_json = {
         "schema": "2.0",
@@ -163,28 +163,28 @@ def _build_table_card(table_markdown: str) -> dict:
             "elements": [
                 {
                     "tag": "markdown",
-                    "content": table_markdown,
+                    "content": markdown_text,
                     "text_align": "left",
                 }
             ],
         },
     }
 
-    logger.debug(f"[table_card] Card structure built: {len(card_json)} keys")
+    logger.debug(f"[markdown_card] Card structure built: {len(card_json)} keys")
     return card_json
 
 
-async def _send_table_card(
-    table_markdown: str,
+async def _send_markdown_card(
+    markdown_text: str,
     lark_client: Any,
     reply_message_id: str | None = None,
     receive_id: str | None = None,
     receive_id_type: str | None = None,
 ) -> bool:
-    """Send a markdown table as a Lark interactive card.
+    """Send markdown content as a Lark interactive card.
 
     Args:
-        table_markdown: Markdown table text
+        markdown_text: Markdown text
         lark_client: Lark client instance
         reply_message_id: Reply message ID (optional)
         receive_id: Receiver ID (optional)
@@ -199,17 +199,15 @@ async def _send_table_card(
             LarkMessageEvent,
         )
     except ImportError:
-        logger.warning("[table_card] Failed to import LarkMessageEvent")
+        logger.warning("[markdown_card] Failed to import LarkMessageEvent")
         return False
 
-    card_json = _build_table_card(table_markdown)
+    card_json = _build_markdown_card(markdown_text)
 
     logger.debug(
-        "[table_card] Sending table card with mode=%s, reply_message_id=%s, receive_id=%s, receive_id_type=%s",
+        "[markdown_card] Sending markdown card with mode=%s, reply_message_id=%s",
         _card_send_mode,
         reply_message_id,
-        receive_id,
-        receive_id_type,
     )
 
     return await LarkMessageEvent._send_interactive_card(
@@ -222,14 +220,14 @@ async def _send_table_card(
 
 
 def _split_text_by_markdown_table(text: str) -> list[str]:
-    """Split text by ALL markdown tables, returning alternating prefix/table/suffix segments."""
+    """Split text by ALL Markdown blocks, returning alternating prefix/table/suffix segments."""
 
     lines = text.splitlines()
     tables = []  # List of (start_line_index, end_line_index)
 
-    logger.debug(f"[split_text] Processing {len(lines)} lines for markdown tables")
+    logger.debug(f"[split_text] Processing {len(lines)} lines for Markdown blocks")
 
-    # Find all markdown tables in the text
+    # Find all Markdown blocks in the text
     for index in range(len(lines) - 1):
         if "|" not in lines[index]:
             continue
@@ -249,7 +247,7 @@ def _split_text_by_markdown_table(text: str) -> list[str]:
         tables.append((table_start, table_end))
 
     if not tables:
-        logger.debug("[split_text] No markdown tables found")
+        logger.debug("[split_text] No Markdown blocks found")
         return [text]
 
     logger.debug(f"[split_text] Found {len(tables)} table(s) total")
@@ -290,13 +288,46 @@ def _split_text_by_markdown_table(text: str) -> list[str]:
     return segments or [text]
 
 
+def _is_markdown_image_segment(text: str) -> bool:
+    """Check if a segment is purely a markdown image."""
+    return bool(re.fullmatch(r"!\[.*?\]\(.*?\)", text.strip()))
+
+
+def _split_text_by_markdown_elements(text: str) -> list[str]:
+    """Split text by Markdown blocks and images, returning segments."""
+    table_segments = _split_text_by_markdown_table(text)
+
+    final_segments = []
+    image_pattern = re.compile(r"(!\[.*?\]\(.*?\))")
+
+    for seg in table_segments:
+        if _is_markdown_table_segment(seg):
+            final_segments.append(seg)
+        else:
+            # split text segment by images
+            last_end = 0
+            for match in image_pattern.finditer(seg):
+                start, end = match.span()
+                prefix = seg[last_end:start].strip("\n")
+                if prefix:
+                    final_segments.append(prefix)
+                final_segments.append(seg[start:end])
+                last_end = end
+
+            suffix = seg[last_end:].strip("\n")
+            if suffix:
+                final_segments.append(suffix)
+
+    return final_segments or [text]
+
+
 def _preprocess_markdown_text(text: str) -> str:
     """
     修复飞书 (Lark) 不支持的一些 Markdown 语义。
-    
+
     Args:
         text (str): 原始 Markdown 文本。
-        
+
     Returns:
         str: 预处理后的 Markdown 文本。
     """
@@ -307,15 +338,15 @@ def _preprocess_markdown_text(text: str) -> str:
     text = re.sub(r"(?m)^(\s*(?:-|[*]|\+)\s+)\[ \]\s+", r"\1⬜ ", text)
     # 将 Markdown 原生任务列表的已完成状态 `- [x] ` 替换为飞书可显示的 Emoji "✅"
     text = re.sub(r"(?m)^(\s*(?:-|[*]|\+)\s+)\[[xX]\]\s+", r"\1✅ ", text)
-    
+
     # 修复飞书不支持的带有空格的水平分割线格式 (例如: * * * 或 - - -) 统一替换为 ---
     text = re.sub(r"(?m)^[ \t]*([*-])[ \t]+\1[ \t]+\1[ \t]*$", r"---", text)
-    
+
     return text
 
 
 def _should_split_message_chain(message_chain: MessageChain) -> bool:
-    """Only split plain-text message chains that contain a markdown table."""
+    """Only split plain-text message chains that contain a Markdown block or image."""
 
     if not message_chain.chain:
         logger.debug("[should_split] Empty message chain")
@@ -328,7 +359,7 @@ def _should_split_message_chain(message_chain: MessageChain) -> bool:
     plain_text = "".join(
         comp.text for comp in message_chain.chain if isinstance(comp, Plain)
     )
-    segments = _split_text_by_markdown_table(plain_text)
+    segments = _split_text_by_markdown_elements(plain_text)
     should_split = len(segments) > 1
     logger.debug(
         f"[should_split] Text length={len(plain_text)}, segments={len(segments)}, should_split={should_split}"
@@ -370,17 +401,18 @@ def _patch_send_message_chain(
         plain_text = "".join(
             comp.text for comp in message_chain.chain if isinstance(comp, Plain)
         )
-        segments = _split_text_by_markdown_table(plain_text)
+        segments = _split_text_by_markdown_elements(plain_text)
 
         logger.info(
-            "[send_patch] Detected markdown table(s) in outgoing message, splitting into %d segments",
+            "[send_patch] Detected markdown elements in outgoing message, splitting into %d segments",
             len(segments),
         )
 
         for idx, segment in enumerate(segments, 1):
             is_table = _is_markdown_table_segment(segment)
-            segment_type = "table" if is_table else "text"
-            logger.debug(
+            is_image = _is_markdown_image_segment(segment)
+            segment_type = "table" if is_table else ("image" if is_image else "text")
+            logger.info(
                 f"[send_patch] Sending segment {idx}/{len(segments)}: {len(segment)} chars ({segment_type})"
             )
 
@@ -389,14 +421,51 @@ def _patch_send_message_chain(
             )
 
             if is_table:
-                logger.debug(f"[send_patch] Segment {idx} is a table, sending as card")
-                await _send_table_card(
+                logger.debug(f"[send_patch] Segment {idx} is table, sending as card")
+                await _send_markdown_card(
                     segment,
                     lark_client,
                     reply_message_id=resolved_reply_id,
                     receive_id=resolved_receive_id,
                     receive_id_type=resolved_receive_type,
                 )
+            elif is_image:
+                logger.debug(
+                    f"[send_patch] Segment {idx} is image, sending as native Image component"
+                )
+                match = re.fullmatch(r"!\[.*?\]\((.*?)\)", segment.strip())
+                if match:
+                    img_url = match.group(1)
+                    try:
+                        from astrbot.api.message_components import Image
+
+                        img_comp = Image.fromURL(img_url)
+                        await original_send_message_chain(
+                            MessageChain(chain=[img_comp]),
+                            lark_client,
+                            reply_message_id=resolved_reply_id,
+                            receive_id=resolved_receive_id,
+                            receive_id_type=resolved_receive_type,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"[send_patch] Failed to send image from url {img_url}: {e}, falling back to plain text"
+                        )
+                        await original_send_message_chain(
+                            MessageChain(chain=[Plain(segment)]),
+                            lark_client,
+                            reply_message_id=resolved_reply_id,
+                            receive_id=resolved_receive_id,
+                            receive_id_type=resolved_receive_type,
+                        )
+                else:
+                    await original_send_message_chain(
+                        MessageChain(chain=[Plain(segment)]),
+                        lark_client,
+                        reply_message_id=resolved_reply_id,
+                        receive_id=resolved_receive_id,
+                        receive_id_type=resolved_receive_type,
+                    )
             else:
                 logger.debug(
                     f"[send_patch] Segment {idx} is text, sending as plain message"
@@ -413,7 +482,7 @@ def _patch_send_message_chain(
 
 
 def _install_patch() -> None:
-    """Patch Lark send_message_chain so markdown tables are sent in segments."""
+    """Patch Lark send_message_chain so Markdown blocks are sent in segments."""
 
     global _original_send_message_chain
 
@@ -425,7 +494,7 @@ def _install_patch() -> None:
 
     current_id = getattr(LarkMessageEvent, "_markdown_table_patch_id", None)
     if current_id is _patch_token:
-        logger.debug("Markdown table patch already installed.")
+        logger.debug("Markdown block patch already installed.")
         return
     if current_id is not None and current_id is not _patch_token:
         logger.warning(
@@ -457,6 +526,7 @@ def _install_patch() -> None:
             if isinstance(message, str):
                 from astrbot.api.event import MessageChain
                 from astrbot.api.message_components import Plain
+
                 message = MessageChain(chain=[Plain(message)])
 
             await LarkMessageEvent.send_message_chain(
@@ -470,7 +540,7 @@ def _install_patch() -> None:
 
         setattr(LarkMessageEvent, "_markdown_table_send_patch_id", _patch_token)
         LarkMessageEvent.send = _patched_send
-    logger.info("Markdown table split patch installed.")
+    logger.info("Markdown block split patch installed.")
 
 
 def _remove_patch() -> None:
@@ -491,7 +561,7 @@ def _remove_patch() -> None:
     if current_id is _patch_token:
         LarkMessageEvent.send_message_chain = staticmethod(_original_send_message_chain)
         delattr(LarkMessageEvent, "_markdown_table_patch_id")
-        logger.info("Markdown table split patch removed.")
+        logger.info("Markdown block split patch removed.")
 
     # Restore patched instance send method if we replaced it
     global _original_send_method
@@ -502,7 +572,7 @@ def _remove_patch() -> None:
             delattr(LarkMessageEvent, "_markdown_table_send_patch_id")
         except Exception:
             pass
-        logger.info("Markdown table send-instance patch removed.")
+        logger.info("Markdown block send-instance patch removed.")
 
     _original_send_message_chain = None
     _original_send_method = None
@@ -511,14 +581,14 @@ def _remove_patch() -> None:
 @register(
     "astrbot_better_lark_markdown",
     "megumism",
-    "Split markdown table messages into separate segments and render as cards.",
+    "Split Markdown block messages into separate segments and render as cards.",
     "1.1.0",
 )
 class Main(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
         _set_card_send_mode(config)
-        logger.info("Markdown table card send mode set to %s.", _card_send_mode)
+        logger.info("Markdown block card send mode set to %s.", _card_send_mode)
 
     async def initialize(self):
         _install_patch()
