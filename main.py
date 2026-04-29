@@ -8,23 +8,121 @@ from astrbot.api import logger
 from astrbot.api.event import MessageChain
 from astrbot.api.message_components import Plain
 from astrbot.api.star import Context, Star, register
+from astrbot.core.config.astrbot_config import AstrBotConfig
 
 _original_send_message_chain: Callable[..., Any] | None = None
 _patch_token = object()
+_original_send_method: Callable[..., Any] | None = None
+
+_card_send_mode = "reply"
+_last_reply_msg_id_in_chat: dict[tuple[str, str], str] = {}
+
+
+def _normalize_card_send_mode(mode: Any) -> str:
+    normalized = str(mode).strip().lower()
+    if normalized in {"direct", "reply", "auto"}:
+        return normalized
+    return "reply"
+
+
+def _set_card_send_mode(config: AstrBotConfig | dict[str, Any] | None) -> None:
+    global _card_send_mode
+
+    if config is None:
+        _card_send_mode = "reply"
+        return
+
+    if hasattr(config, "get"):
+        raw_mode = config.get("card_send_mode", "reply")
+    else:
+        raw_mode = getattr(config, "card_send_mode", "reply")
+
+    _card_send_mode = _normalize_card_send_mode(raw_mode)
+    if _card_send_mode != raw_mode:
+        logger.debug(
+            "[card_send_mode] Requested mode=%s, normalized to=%s",
+            raw_mode,
+            _card_send_mode,
+        )
+
+
+def _resolve_send_targets(
+    reply_message_id: str | None,
+    receive_id: str | None,
+    receive_id_type: str | None,
+) -> tuple[str | None, str | None, str | None]:
+    """Resolve send targets according to configured card_send_mode.
+    Applies for both plain text and card sends."""
+    if _card_send_mode == "reply":
+        return reply_message_id, receive_id, receive_id_type
+
+    if _card_send_mode == "auto":
+        if reply_message_id and receive_id and receive_id_type:
+            chat_key = (receive_id, receive_id_type)
+            last_replied = _last_reply_msg_id_in_chat.get(chat_key)
+            if last_replied != reply_message_id:
+                _last_reply_msg_id_in_chat[chat_key] = reply_message_id
+                # we SHOULD reply
+                return reply_message_id, receive_id, receive_id_type
+            else:
+                # same as last time, so fallback to direct (no reply_message_id)
+                return None, receive_id, receive_id_type
+        return reply_message_id, receive_id, receive_id_type
+
+    if _card_send_mode == "direct":
+        if receive_id and receive_id_type:
+            return None, receive_id, receive_id_type
+        if reply_message_id:
+            logger.debug(
+                "[card_send_mode] Direct mode missing receive_id; falling back to reply"
+            )
+        return reply_message_id, receive_id, receive_id_type
+
+    return reply_message_id, receive_id, receive_id_type
+
+
+def _derive_receive_from_message_obj(message_obj: Any) -> tuple[str | None, str | None]:
+    """Try to derive a receive_id and receive_id_type from an AstrBotMessage object."""
+    # Group message -> chat_id
+    try:
+        group_id = getattr(message_obj, "group_id", None)
+        if group_id:
+            return group_id, "chat_id"
+    except Exception:
+        pass
+
+    # Private message -> open_id (sender.user_id)
+    try:
+        sender = getattr(message_obj, "sender", None)
+        if sender and getattr(sender, "user_id", None):
+            return getattr(sender, "user_id"), "open_id"
+    except Exception:
+        pass
+
+    return None, None
+
+
+def _get_table_row_cells(line: str) -> list[str]:
+    """Extract cells from a markdown table row, handling outer pipes."""
+    stripped = line.strip()
+    if not stripped or "|" not in stripped:
+        return []
+
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+
+    return [cell.strip() for cell in stripped.split("|")]
 
 
 def _is_markdown_table_separator(line: str) -> bool:
     """Return True when a line looks like a markdown table separator row."""
-
-    stripped = line.strip()
-    if "|" not in stripped:
-        return False
-
-    cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+    cells = _get_table_row_cells(line)
     if len(cells) < 2:
         return False
 
-    return all(re.fullmatch(r":?-{3,}:?", cell) is not None for cell in cells)
+    return all(re.fullmatch(r":?-+:?", cell) is not None for cell in cells)
 
 
 def _is_markdown_table_segment(text: str) -> bool:
@@ -34,12 +132,13 @@ def _is_markdown_table_segment(text: str) -> bool:
     if len(lines) < 3:
         return False
 
-    # First line and last line should contain pipes
-    if "|" not in lines[0] or "|" not in lines[-1]:
-        return False
-
     # Second line should be separator
     if not _is_markdown_table_separator(lines[1]):
+        return False
+
+    header_cells = _get_table_row_cells(lines[0])
+    sep_cells = _get_table_row_cells(lines[1])
+    if len(header_cells) < 2 or len(header_cells) != len(sep_cells):
         return False
 
     # All lines should have pipes (table structure)
@@ -106,7 +205,11 @@ async def _send_table_card(
     card_json = _build_table_card(table_markdown)
 
     logger.debug(
-        f"[table_card] Sending table card to receive_id={receive_id}, type={receive_id_type}"
+        "[table_card] Sending table card with mode=%s, reply_message_id=%s, receive_id=%s, receive_id_type=%s",
+        _card_send_mode,
+        reply_message_id,
+        receive_id,
+        receive_id_type,
     )
 
     return await LarkMessageEvent._send_interactive_card(
@@ -223,12 +326,15 @@ def _patch_send_message_chain(
 
         if not _should_split_message_chain(message_chain):
             logger.debug("[send_patch] No table splitting needed, pass through")
+            resolved_reply_id, resolved_receive_id, resolved_receive_type = (
+                _resolve_send_targets(reply_message_id, receive_id, receive_id_type)
+            )
             return await original_send_message_chain(
                 message_chain,
                 lark_client,
-                reply_message_id=reply_message_id,
-                receive_id=receive_id,
-                receive_id_type=receive_id_type,
+                reply_message_id=resolved_reply_id,
+                receive_id=resolved_receive_id,
+                receive_id_type=resolved_receive_type,
             )
 
         plain_text = "".join(
@@ -248,14 +354,18 @@ def _patch_send_message_chain(
                 f"[send_patch] Sending segment {idx}/{len(segments)}: {len(segment)} chars ({segment_type})"
             )
 
+            resolved_reply_id, resolved_receive_id, resolved_receive_type = (
+                _resolve_send_targets(reply_message_id, receive_id, receive_id_type)
+            )
+
             if is_table:
                 logger.debug(f"[send_patch] Segment {idx} is a table, sending as card")
                 await _send_table_card(
                     segment,
                     lark_client,
-                    reply_message_id=reply_message_id,
-                    receive_id=receive_id,
-                    receive_id_type=receive_id_type,
+                    reply_message_id=resolved_reply_id,
+                    receive_id=resolved_receive_id,
+                    receive_id_type=resolved_receive_type,
                 )
             else:
                 logger.debug(
@@ -264,9 +374,9 @@ def _patch_send_message_chain(
                 await original_send_message_chain(
                     MessageChain(chain=[Plain(segment)]),
                     lark_client,
-                    reply_message_id=reply_message_id,
-                    receive_id=receive_id,
-                    receive_id_type=receive_id_type,
+                    reply_message_id=resolved_reply_id,
+                    receive_id=resolved_receive_id,
+                    receive_id_type=resolved_receive_type,
                 )
 
     return patched_send_message_chain
@@ -300,6 +410,33 @@ def _install_patch() -> None:
     LarkMessageEvent.send_message_chain = staticmethod(
         _patch_send_message_chain(_original_send_message_chain)
     )
+    # Also patch the instance `send` method so we can derive receive_id from
+    # the message object for reply scenarios. This lets "direct" mode work
+    # for normal reply flows by passing receive_id to send_message_chain.
+    global _original_send_method
+
+    if not hasattr(LarkMessageEvent, "_markdown_table_send_patch_id"):
+        _original_send_method = LarkMessageEvent.send
+
+        async def _patched_send(self, message: Any) -> None:
+            # Try to derive receive target from message object
+            derived_receive_id, derived_receive_type = _derive_receive_from_message_obj(
+                getattr(self, "message_obj", None)
+            )
+
+            await LarkMessageEvent.send_message_chain(
+                message,
+                self.bot,
+                reply_message_id=getattr(self, "message_obj", None)
+                and getattr(self.message_obj, "message_id", None),
+                receive_id=derived_receive_id,
+                receive_id_type=derived_receive_type,
+            )
+            if _original_send_method is not None:
+                await _original_send_method(self, message)
+
+        setattr(LarkMessageEvent, "_markdown_table_send_patch_id", _patch_token)
+        LarkMessageEvent.send = _patched_send
     logger.info("Markdown table split patch installed.")
 
 
@@ -323,7 +460,19 @@ def _remove_patch() -> None:
         delattr(LarkMessageEvent, "_markdown_table_patch_id")
         logger.info("Markdown table split patch removed.")
 
+    # Restore patched instance send method if we replaced it
+    global _original_send_method
+    send_patch_id = getattr(LarkMessageEvent, "_markdown_table_send_patch_id", None)
+    if send_patch_id is _patch_token and _original_send_method is not None:
+        LarkMessageEvent.send = _original_send_method
+        try:
+            delattr(LarkMessageEvent, "_markdown_table_send_patch_id")
+        except Exception:
+            pass
+        logger.info("Markdown table send-instance patch removed.")
+
     _original_send_message_chain = None
+    _original_send_method = None
 
 
 @register(
@@ -333,8 +482,10 @@ def _remove_patch() -> None:
     "1.1.0",
 )
 class Main(Star):
-    def __init__(self, context: Context):
+    def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
+        _set_card_send_mode(config)
+        logger.info("Markdown table card send mode set to %s.", _card_send_mode)
 
     async def initialize(self):
         _install_patch()
