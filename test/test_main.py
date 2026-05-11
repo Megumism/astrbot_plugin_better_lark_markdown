@@ -36,8 +36,7 @@ except ImportError:
 
 
 def _make_plugin(mode: str = "direct"):
-    from astrbot.api.provider import Context
-    return Main(cast(Context, SimpleNamespace()), {"card_send_mode": mode})
+    return Main(cast(Any, SimpleNamespace()), cast(Any, {"card_send_mode": mode}))
 
 
 @pytest.mark.asyncio
@@ -192,7 +191,7 @@ async def test_install_patch_keeps_plain_text_without_table_as_is(monkeypatch):
 
         await lark_event_mod.LarkMessageEvent.send_message_chain(
             MessageChain(chain=[Plain("hello world")]),
-            SimpleNamespace(im=SimpleNamespace()),
+            cast(Any, SimpleNamespace(im=SimpleNamespace())),
             reply_message_id="mid",
         )
 
@@ -260,7 +259,7 @@ async def test_install_patch_uses_reply_mode_when_configured(monkeypatch):
             MessageChain(
                 chain=[Plain("A\n| col1 | col2 |\n| --- | --- |\n| 1 | 2 |\nB")]
             ),
-            SimpleNamespace(im=SimpleNamespace()),
+            cast(Any, SimpleNamespace(im=SimpleNamespace())),
             reply_message_id="mid",
             receive_id="chat-1",
             receive_id_type="chat_id",
