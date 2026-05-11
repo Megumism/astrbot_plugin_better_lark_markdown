@@ -5,6 +5,7 @@
 import os
 import sys
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -35,7 +36,8 @@ except ImportError:
 
 
 def _make_plugin(mode: str = "direct"):
-    return Main(SimpleNamespace(), {"card_send_mode": mode})
+    from astrbot.api.provider import Context
+    return Main(cast(Context, SimpleNamespace()), {"card_send_mode": mode})
 
 
 @pytest.mark.asyncio
@@ -131,11 +133,12 @@ async def test_install_patch_splits_plain_text_table_messages(monkeypatch):
         _make_plugin("direct")
         _install_patch()
 
+        from lark_oapi.client import Client
         await lark_event_mod.LarkMessageEvent.send_message_chain(
             MessageChain(
                 chain=[Plain("A\n| col1 | col2 |\n| --- | --- |\n| 1 | 2 |\nB")]
             ),
-            SimpleNamespace(im=SimpleNamespace()),
+            cast(Client, SimpleNamespace(im=SimpleNamespace())),
             reply_message_id="mid",
             receive_id="chat-1",
             receive_id_type="chat_id",
