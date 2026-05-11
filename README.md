@@ -48,6 +48,10 @@
 
 ## 3. 参考内容
 
+[飞书 - 发送消息内容结构](https://open.feishu.cn/document/server-docs/im-v1/message-content-description/create_json#c9e08671)
+[飞书 - 上传图片](https://open.feishu.cn/document/server-docs/im-v1/image/create?appId=cli_a97aaf74f8b9dcd1)
+[AstrBot - 插件开发指南](https://docs.astrbot.app/dev/star/plugin-new.html)
+
 > 附：飞书原生可处理的 Markdown 语法列表
 >
 > - [x] 各级标题

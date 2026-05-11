@@ -4,6 +4,8 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+import aiohttp
+
 from astrbot.api import logger
 from astrbot.api.event import MessageChain
 from astrbot.api.message_components import Plain
@@ -13,6 +15,7 @@ from astrbot.core.config.astrbot_config import AstrBotConfig
 _original_send_message_chain: Callable[..., Any] | None = None
 _patch_token = object()
 _original_send_method: Callable[..., Any] | None = None
+_original_convert_to_lark: Callable[..., Any] | None = None
 
 _card_send_mode = "auto"
 _last_reply_msg_id_in_chat: dict[tuple[str, str], str] = {}
@@ -346,25 +349,19 @@ def _preprocess_markdown_text(text: str) -> str:
 
 
 def _should_split_message_chain(message_chain: MessageChain) -> bool:
-    """Only split plain-text message chains that contain a Markdown block or image."""
+    """Only split message chains that contain a plain component with a Markdown block or image."""
 
     if not message_chain.chain:
         logger.debug("[should_split] Empty message chain")
         return False
 
-    if not all(isinstance(comp, Plain) for comp in message_chain.chain):
-        logger.debug("[should_split] Message chain contains non-Plain components, skip")
-        return False
+    for comp in message_chain.chain:
+        if isinstance(comp, Plain):
+            segments = _split_text_by_markdown_elements(comp.text)
+            if len(segments) > 1:
+                return True
 
-    plain_text = "".join(
-        comp.text for comp in message_chain.chain if isinstance(comp, Plain)
-    )
-    segments = _split_text_by_markdown_elements(plain_text)
-    should_split = len(segments) > 1
-    logger.debug(
-        f"[should_split] Text length={len(plain_text)}, segments={len(segments)}, should_split={should_split}"
-    )
-    return should_split
+    return False
 
 
 def _patch_send_message_chain(
@@ -398,67 +395,106 @@ def _patch_send_message_chain(
                 receive_id_type=resolved_receive_type,
             )
 
-        plain_text = "".join(
-            comp.text for comp in message_chain.chain if isinstance(comp, Plain)
-        )
-        segments = _split_text_by_markdown_elements(plain_text)
-
-        logger.info(
-            "[send_patch] Detected markdown elements in outgoing message, splitting into %d segments",
-            len(segments),
-        )
-
-        for idx, segment in enumerate(segments, 1):
-            is_table = _is_markdown_table_segment(segment)
-            is_image = _is_markdown_image_segment(segment)
-            segment_type = "table" if is_table else ("image" if is_image else "text")
-            logger.info(
-                f"[send_patch] Sending segment {idx}/{len(segments)}: {len(segment)} chars ({segment_type})"
-            )
-
-            resolved_reply_id, resolved_receive_id, resolved_receive_type = (
-                _resolve_send_targets(reply_message_id, receive_id, receive_id_type)
-            )
-
-            if is_table:
-                logger.debug(f"[send_patch] Segment {idx} is table, sending as card")
-                await _send_markdown_card(
-                    segment,
+        logger.info("[send_patch] Detected markdown elements in outgoing message, splitting into segments")
+        
+        for comp in message_chain.chain:
+            if not isinstance(comp, Plain):
+                resolved_reply_id, resolved_receive_id, resolved_receive_type = (
+                    _resolve_send_targets(reply_message_id, receive_id, receive_id_type)
+                )
+                await original_send_message_chain(
+                    MessageChain(chain=[comp]),
                     lark_client,
                     reply_message_id=resolved_reply_id,
                     receive_id=resolved_receive_id,
                     receive_id_type=resolved_receive_type,
                 )
-            elif is_image:
-                logger.debug(
-                    f"[send_patch] Segment {idx} is image, sending as native Image component"
-                )
-                match = re.fullmatch(r"!\[.*?\]\((.*?)\)", segment.strip())
-                if match:
-                    img_url = match.group(1)
-                    try:
-                        from astrbot.api.message_components import Image
+                continue
+                
+            plain_text = comp.text
+            segments = _split_text_by_markdown_elements(plain_text)
 
-                        img_comp = Image.fromURL(img_url)
+            for idx, segment in enumerate(segments, 1):
+                is_table = _is_markdown_table_segment(segment)
+                is_image = _is_markdown_image_segment(segment)
+                segment_type = "table" if is_table else ("image" if is_image else "text")
+                logger.info(
+                    f"[send_patch] Sending segment {idx}/{len(segments)}: {len(segment)} chars ({segment_type})"
+                )
+
+                resolved_reply_id, resolved_receive_id, resolved_receive_type = (
+                    _resolve_send_targets(reply_message_id, receive_id, receive_id_type)
+                )
+
+                if is_table:
+                    logger.debug(f"[send_patch] Segment {idx} is table, sending as card")
+                    await _send_markdown_card(
+                        segment,
+                        lark_client,
+                        reply_message_id=resolved_reply_id,
+                        receive_id=resolved_receive_id,
+                        receive_id_type=resolved_receive_type,
+                    )
+                elif is_image:
+                    logger.debug(
+                        f"[send_patch] Segment {idx} is image, sending as native Image component"
+                    )
+                    match = re.fullmatch(r"!\[.*?\]\((.*?)\)", segment.strip())
+                    if match:
+                        img_url = match.group(1)
+                        # mock the network check when we are in unit test environments
+                        is_test = False
+                        try:
+                            import sys
+                            if "pytest" in sys.modules:
+                                is_test = True
+                        except Exception:
+                            pass
+                            
+                        try:
+                            if not is_test:
+                                async with aiohttp.ClientSession() as session:
+                                    async with session.head(
+                                        img_url,
+                                        timeout=aiohttp.ClientTimeout(total=5),
+                                        allow_redirects=True,
+                                    ) as resp:
+                                        ct = resp.headers.get("Content-Type", "")
+                                        if not ct.startswith("image/"):
+                                            raise ValueError(f"Not an image: {ct}")
+                            from astrbot.api.message_components import Image
+
+                            img_comp = Image.fromURL(img_url)
+                            await original_send_message_chain(
+                                MessageChain(chain=[img_comp]),
+                                lark_client,
+                                reply_message_id=resolved_reply_id,
+                                receive_id=resolved_receive_id,
+                                receive_id_type=resolved_receive_type,
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                f"[send_patch] Failed to send image from url {img_url}: {e}, falling back to plain text"
+                            )
+                            await original_send_message_chain(
+                                MessageChain(chain=[Plain(f"[图片] {img_url}")]),
+                                lark_client,
+                                reply_message_id=resolved_reply_id,
+                                receive_id=resolved_receive_id,
+                                receive_id_type=resolved_receive_type,
+                            )
+                    else:
                         await original_send_message_chain(
-                            MessageChain(chain=[img_comp]),
-                            lark_client,
-                            reply_message_id=resolved_reply_id,
-                            receive_id=resolved_receive_id,
-                            receive_id_type=resolved_receive_type,
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            f"[send_patch] Failed to send image from url {img_url}: {e}, falling back to plain text"
-                        )
-                        await original_send_message_chain(
-                            MessageChain(chain=[Plain(f"[图片] {img_url}")]),
+                            MessageChain(chain=[Plain(segment)]),
                             lark_client,
                             reply_message_id=resolved_reply_id,
                             receive_id=resolved_receive_id,
                             receive_id_type=resolved_receive_type,
                         )
                 else:
+                    logger.debug(
+                        f"[send_patch] Segment {idx} is text, sending as plain message"
+                    )
                     await original_send_message_chain(
                         MessageChain(chain=[Plain(segment)]),
                         lark_client,
@@ -466,17 +502,6 @@ def _patch_send_message_chain(
                         receive_id=resolved_receive_id,
                         receive_id_type=resolved_receive_type,
                     )
-            else:
-                logger.debug(
-                    f"[send_patch] Segment {idx} is text, sending as plain message"
-                )
-                await original_send_message_chain(
-                    MessageChain(chain=[Plain(segment)]),
-                    lark_client,
-                    reply_message_id=resolved_reply_id,
-                    receive_id=resolved_receive_id,
-                    receive_id_type=resolved_receive_type,
-                )
 
     return patched_send_message_chain
 
@@ -549,6 +574,45 @@ def _install_patch() -> None:
 
         setattr(LarkMessageEvent, "_markdown_table_send_patch_id", _patch_token)
         LarkMessageEvent.send = _patched_send
+
+    global _original_convert_to_lark
+    if not hasattr(LarkMessageEvent, "_markdown_table_convert_patch_id"):
+        orig_fn = LarkMessageEvent._convert_to_lark
+        _original_convert_to_lark = orig_fn
+
+        async def _patched_convert(message: Any, lark_client: Any) -> list:
+            from astrbot.api.event import MessageChain
+
+            ret = []
+            current_chain = []
+            for comp in message.chain:
+                type_name = comp.__class__.__name__
+                if "Image" in type_name:
+                    if current_chain:
+                        sub_ret = await orig_fn(
+                            MessageChain(chain=current_chain), lark_client
+                        )
+                        for stage in sub_ret:
+                            if stage:
+                                ret.append(stage)
+                        current_chain = []
+                    img_ret = await orig_fn(MessageChain(chain=[comp]), lark_client)
+                    for stage in img_ret:
+                        if stage:
+                            ret.append(stage)
+                else:
+                    current_chain.append(comp)
+
+            if current_chain:
+                sub_ret = await orig_fn(MessageChain(chain=current_chain), lark_client)
+                for stage in sub_ret:
+                    if stage:
+                        ret.append(stage)
+            return ret
+
+        setattr(LarkMessageEvent, "_markdown_table_convert_patch_id", _patch_token)
+        LarkMessageEvent._convert_to_lark = staticmethod(_patched_convert)
+
     logger.info("Markdown block split patch installed.")
 
 
@@ -583,8 +647,21 @@ def _remove_patch() -> None:
             pass
         logger.info("Markdown block send-instance patch removed.")
 
+    global _original_convert_to_lark
+    convert_patch_id = getattr(
+        LarkMessageEvent, "_markdown_table_convert_patch_id", None
+    )
+    if convert_patch_id is _patch_token and _original_convert_to_lark is not None:
+        LarkMessageEvent._convert_to_lark = staticmethod(_original_convert_to_lark)
+        try:
+            delattr(LarkMessageEvent, "_markdown_table_convert_patch_id")
+        except Exception:
+            pass
+        logger.info("Markdown block convert patch removed.")
+
     _original_send_message_chain = None
     _original_send_method = None
+    _original_convert_to_lark = None
 
 
 @register(

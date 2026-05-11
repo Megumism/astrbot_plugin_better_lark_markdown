@@ -18,12 +18,20 @@ for path in (ASTRBOT_ROOT, PLUGIN_ROOT):
 from astrbot.api.event import MessageChain  # noqa: E402
 from astrbot.api.message_components import Plain  # noqa: E402
 from astrbot.core.platform.sources.lark import lark_event as lark_event_mod  # noqa: E402
-from main import (  # noqa: E402
-    Main,
-    _install_patch,
-    _remove_patch,
-    _split_text_by_markdown_table,
-)
+try:
+    from astrbot_better_lark_markdown.main import (  # noqa: E402
+        Main,
+        _install_patch,
+        _remove_patch,
+        _split_text_by_markdown_table,
+    )
+except ImportError:
+    from data.plugins.astrbot_better_lark_markdown.main import (  # noqa: E402
+        Main,
+        _install_patch,
+        _remove_patch,
+        _split_text_by_markdown_table,
+    )
 
 
 def _make_plugin(mode: str = "direct"):
